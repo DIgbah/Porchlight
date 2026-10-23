@@ -1,0 +1,20 @@
+# Render Blueprint: creates the database and the web service together.
+databases:
+  - name: porchlight-db
+    plan: free
+
+services:
+  - type: web
+    name: porchlight
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: porchlight-db
+          property: connectionString
