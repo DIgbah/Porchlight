@@ -11,6 +11,7 @@ const { pool, init } = require('./db');
 const PORT = process.env.PORT || 3000;
 const SESSION_DAYS = 60;
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const EMOJIS = ['❤️','😂','😮','😢','👍','👎','🔥','🎉','😍','🙏','👀','💯','🤔','😡','😭','👏','💀','✨'];
 
 const app = express();
 app.set('trust proxy', 1);
@@ -137,13 +138,30 @@ async function pruneImage(id) {
     `delete from images i where i.id = $1
        and not exists (select 1 from messages m where m.image_id = i.id)
        and not exists (select 1 from stickers s where s.image_id = i.id)
-       and not exists (select 1 from users u where u.avatar_image_id = i.id)`,
+       and not exists (select 1 from users u where u.avatar_image_id = i.id)
+       and not exists (select 1 from reactions r where r.image_id = i.id)`,
     [id]
   );
 }
+// Groups reactions per message: [{ key, emoji, imageId, userIds }] in the order first used.
+async function reactionsFor(ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const { rows } = await pool.query(
+    'select message_id, rkey, emoji, image_id, user_id from reactions where message_id = any($1::bigint[]) order by id', [ids]);
+  for (const r of rows) {
+    const mid = Number(r.message_id);
+    let list = out.get(mid);
+    if (!list) { list = []; out.set(mid, list); }
+    let g = list.find((x) => x.key === r.rkey);
+    if (!g) { g = { key: r.rkey, emoji: r.emoji, imageId: r.image_id, userIds: [] }; list.push(g); }
+    g.userIds.push(r.user_id);
+  }
+  return out;
+}
 const messageRow = (r) => ({
   id: Number(r.id), channelId: r.channel_id, userId: r.user_id, name: r.name, color: r.color,
-  body: r.body, imageId: r.image_id, sticker: !!r.sticker, avatarId: r.avatar_image_id || null, ts: r.ts,
+  body: r.body, imageId: r.image_id, sticker: !!r.sticker, avatarId: r.avatar_image_id || null, ts: r.ts, reactions: [],
 });
 const MESSAGE_SELECT = `
   select m.id, m.channel_id, m.user_id, m.body, m.image_id, m.sticker,
@@ -414,7 +432,9 @@ app.get('/api/channels/:id/messages', requireAuth, wrap(async (req, res) => {
     [channelId, Number.isFinite(before) ? before : null, limit + 1]
   );
   const hasMore = rows.length > limit;
-  res.json({ messages: rows.slice(0, limit).reverse().map(messageRow), hasMore });
+  const page = rows.slice(0, limit).reverse();
+  const rx = await reactionsFor(page.map((r) => Number(r.id)));
+  res.json({ messages: page.map((r) => Object.assign(messageRow(r), { reactions: rx.get(Number(r.id)) || [] })), hasMore });
 }));
 
 app.post('/api/channels/:id/messages', requireAuth, wrap(async (req, res) => {
@@ -456,6 +476,41 @@ app.delete('/api/messages/:id', requireAuth, wrap(async (req, res) => {
   await pruneImage(rows[0].image_id);
   sendTo(await memberIds(rows[0].space_id), { type: 'delete', channelId: rows[0].channel_id, messageId: id });
   res.json({ ok: true });
+}));
+
+/* ---------- reactions ---------- */
+const MAX_REACTIONS_PER_USER = 8, MAX_REACTION_TYPES = 20;
+app.post('/api/messages/:id/reactions', requireAuth, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) throw httpError(404, 'Message not found.');
+  const info = await pool.query('select m.channel_id, c.space_id from messages m join channels c on c.id = m.channel_id where m.id = $1', [id]);
+  if (!info.rowCount || !(await isMember(info.rows[0].space_id, req.me.id))) throw httpError(404, 'Message not found.');
+  const { channel_id: channelId, space_id: spaceId } = info.rows[0];
+  const b = req.body || {};
+  let rkey, emoji = null, imageId = null, removeOnly = false;
+  if (b.emoji != null) {
+    if (!EMOJIS.includes(b.emoji)) throw httpError(400, 'Pick one of the reactions.');
+    emoji = b.emoji; rkey = 'e:' + emoji;
+  } else if (b.stickerId != null) {
+    const st = await pool.query('select image_id from stickers where id = $1 and user_id = $2', [Number(b.stickerId), req.me.id]);
+    if (!st.rowCount) throw httpError(400, 'That sticker is not in your pack.');
+    imageId = st.rows[0].image_id; rkey = 'i:' + imageId;
+  } else if (b.removeImageId != null) {
+    const n = Number(b.removeImageId);
+    if (!Number.isInteger(n)) throw httpError(400, 'Pick a reaction.');
+    rkey = 'i:' + n; removeOnly = true;
+  } else throw httpError(400, 'Pick a reaction.');
+  const del = await pool.query('delete from reactions where message_id = $1 and user_id = $2 and rkey = $3', [id, req.me.id, rkey]);
+  if (!del.rowCount && !removeOnly) {
+    const types = await pool.query('select count(distinct rkey)::int as n from reactions where message_id = $1', [id]);
+    if (types.rows[0].n >= MAX_REACTION_TYPES) throw httpError(400, 'This message already has as many different reactions as it can hold.');
+    const mine = await pool.query('select count(*)::int as n from reactions where message_id = $1 and user_id = $2', [id, req.me.id]);
+    if (mine.rows[0].n >= MAX_REACTIONS_PER_USER) throw httpError(400, `You can add up to ${MAX_REACTIONS_PER_USER} reactions to one message. Remove one first.`);
+    await pool.query('insert into reactions(message_id, user_id, rkey, emoji, image_id) values ($1,$2,$3,$4,$5) on conflict do nothing', [id, req.me.id, rkey, emoji, imageId]);
+  }
+  const reactions = (await reactionsFor([id])).get(id) || [];
+  sendTo(await memberIds(spaceId), { type: 'reactions', channelId, messageId: id, reactions });
+  res.json({ reactions });
 }));
 
 /* ---------- images ---------- */
@@ -532,6 +587,8 @@ app.get('/images/:id', requireAuth, wrap(async (req, res) => {
     `select i.mime, i.data from images i
       where i.id = $1 and (i.user_id = $2
         or exists (select 1 from users u where u.avatar_image_id = i.id)
+        or exists (select 1 from reactions r join messages rm on rm.id = r.message_id join channels rc on rc.id = rm.channel_id
+                     join members rmb on rmb.space_id = rc.space_id where r.image_id = i.id and rmb.user_id = $2)
         or exists (
         select 1 from messages m join channels c on c.id = m.channel_id
           join members mb on mb.space_id = c.space_id
@@ -609,7 +666,7 @@ setInterval(() => {
 /* ---------- housekeeping ---------- */
 async function cleanup() {
   try {
-    await pool.query("delete from images i where i.created_at < now() - interval '1 day' and not exists (select 1 from messages m where m.image_id = i.id) and not exists (select 1 from stickers s where s.image_id = i.id) and not exists (select 1 from users u where u.avatar_image_id = i.id)");
+    await pool.query("delete from images i where i.created_at < now() - interval '1 day' and not exists (select 1 from messages m where m.image_id = i.id) and not exists (select 1 from stickers s where s.image_id = i.id) and not exists (select 1 from users u where u.avatar_image_id = i.id) and not exists (select 1 from reactions r where r.image_id = i.id)");
     await pool.query("delete from sessions where created_at < now() - ($1 || ' days')::interval", [String(SESSION_DAYS)]);
   } catch (e) { console.error('Cleanup failed:', e.message); }
 }
