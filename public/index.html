@@ -55,6 +55,7 @@
         <button class="btn primary" data-open="server">Start a server</button>
         <button class="btn" data-open="group">New group chat</button>
         <button class="btn" data-open="join">Join with a code</button>
+        <button class="btn" data-open="dm">Message a friend</button>
       </div>
     </section>
     <div class="msgs" id="msgs" role="log" aria-live="polite" aria-label="Messages"></div>
@@ -63,6 +64,7 @@
       <div class="chip" id="chip" hidden><img id="chipImg" alt=""><span id="chipName"></span><button class="mini" id="chipX" aria-label="Remove photo"></button></div>
       <div class="box">
         <button class="mini" id="attachBtn" aria-label="Attach a photo"></button>
+        <button class="mini" id="stickerBtn" aria-label="Stickers"></button>
         <textarea id="input" rows="1" maxlength="4000" aria-label="Message" placeholder="Write a message"></textarea>
         <button class="send" id="sendBtn" aria-label="Send message"></button>
       </div>
@@ -78,11 +80,55 @@
       <button class="choice" data-open="server"><b>Start a server</b><span>A home for a crew, with channels like general or photos.</span></button>
       <button class="choice" data-open="group"><b>New group chat</b><span>One conversation for a handful of people.</span></button>
       <button class="choice" data-open="join"><b>Join with a code</b><span>Got an invite code from a friend? Enter it here.</span></button>
+      <button class="choice" data-open="dm"><b>Message someone</b><span>Start a private chat with a friend using their username.</span></button>
     </div>
     <form class="pane" id="pane-server"><label for="serverName">Server name</label><input type="text" id="serverName" maxlength="40" autocomplete="off" placeholder="Friday crew"><p class="err" id="err-server" hidden></p><button class="btn primary" type="submit">Create server</button></form>
     <form class="pane" id="pane-group"><label for="groupName">Group name</label><input type="text" id="groupName" maxlength="40" autocomplete="off" placeholder="Road trip planning"><p class="err" id="err-group" hidden></p><button class="btn primary" type="submit">Create group chat</button></form>
     <form class="pane" id="pane-join"><label for="joinCode">Invite code</label><input type="text" id="joinCode" maxlength="12" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH"><p class="err" id="err-join" hidden></p><button class="btn primary" type="submit">Join</button></form>
     <form class="pane" id="pane-channel"><label for="channelName">Channel name</label><input type="text" id="channelName" maxlength="30" autocomplete="off" placeholder="photos"><p class="err" id="err-channel" hidden></p><button class="btn primary" type="submit">Add channel</button></form>
+    <form class="pane" id="pane-dm"><label for="dmUser">Their username</label><input type="text" id="dmUser" maxlength="22" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sam_22"><p class="hint">Your friend can find their username under their name at the bottom left.</p><p class="err" id="err-dm" hidden></p><button class="btn primary" type="submit">Open chat</button></form>
+    <div class="pane" id="pane-profile"></div>
+    <form class="pane" id="pane-edit">
+      <div class="avedit">
+        <div id="editAvatar"></div>
+        <div class="col"><button type="button" class="btn" id="avPick">Change photo</button><button type="button" class="btn" id="avClear">Remove photo</button></div>
+        <input type="file" id="avFile" accept="image/png,image/jpeg,image/webp" hidden>
+      </div>
+      <div class="field"><label for="editName">Display name</label><input type="text" id="editName" maxlength="32" autocomplete="off"></div>
+      <div class="field"><label for="editStatus">Status</label><input type="text" id="editStatus" maxlength="60" autocomplete="off" placeholder="Out for a walk"></div>
+      <div class="field"><label for="editBio">About you</label><textarea id="editBio" maxlength="160" rows="3" placeholder="A line or two about you"></textarea><small id="bioCount"></small></div>
+      <div class="field"><span class="lab" id="colourLabel">Colour</span><div class="swatches" id="swatches" role="group" aria-labelledby="colourLabel"></div></div>
+      <p class="err" id="err-edit" hidden></p>
+      <button class="btn primary" type="submit">Save profile</button>
+    </form>
+    <div class="pane" id="pane-stickers">
+      <div class="row2"><button type="button" class="btn primary" id="makeSticker">Make a sticker</button></div>
+      <div class="sgrid" id="stickerGrid"></div>
+      <p class="hint" id="stickerHint"></p>
+    </div>
+    <div class="pane" id="pane-maker">
+      <div id="mkPick" class="mkpick"><button type="button" class="btn primary" id="mkChoose">Choose a photo</button><p class="hint">Pick a picture to turn into a sticker. Photos stay on your device until you save.</p></div>
+      <div id="mkEdit" hidden>
+        <canvas id="stickerCanvas" width="512" height="512" aria-label="Sticker preview"></canvas>
+        <div class="seg" role="group" aria-label="What dragging does">
+          <button type="button" data-mode="move" aria-pressed="true">Move and zoom</button>
+          <button type="button" data-mode="erase" aria-pressed="false">Erase background</button>
+        </div>
+        <p class="hint" id="mkModeHint">Drag the picture to reposition it.</p>
+        <div class="field" id="mkZoomRow"><label for="mkZoom">Zoom</label><input type="range" id="mkZoom" min="1" max="3" step="0.01" value="1"></div>
+        <div class="field" id="mkTolRow" hidden><label for="mkTol">How much to erase</label><input type="range" id="mkTol" min="8" max="90" step="1" value="35"></div>
+        <div class="row2" id="mkEraseBtns" hidden><button type="button" class="btn" id="mkUndo">Undo last erase</button><button type="button" class="btn" id="mkClear">Reset erasing</button></div>
+        <div class="seg" role="group" aria-label="Shape">
+          <button type="button" data-shape="circle" aria-pressed="true">Circle</button>
+          <button type="button" data-shape="rounded" aria-pressed="false">Rounded</button>
+          <button type="button" data-shape="square" aria-pressed="false">Square</button>
+        </div>
+        <label class="check"><input type="checkbox" id="mkOutline" checked> White outline</label>
+        <div class="row2"><button type="button" class="btn primary" id="mkSave">Add to my stickers</button><button type="button" class="btn" id="mkChange">Different photo</button></div>
+        <p class="err" id="err-maker" hidden></p>
+      </div>
+      <input type="file" id="stickerFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+    </div>
     <div class="pane" id="pane-invite">
       <p>Send this code to a friend. They create an account, choose Join with a code, and type it in.</p>
       <div class="code" id="inviteCode"></div>
