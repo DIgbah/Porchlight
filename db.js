@@ -68,6 +68,18 @@ create table if not exists messages (
   created_at timestamptz not null default now()
 );
 create index if not exists messages_channel_idx on messages(channel_id, id desc);
+
+alter table users add column if not exists avatar_image_id int references images(id) on delete set null;
+alter table users add column if not exists bio text not null default '';
+alter table users add column if not exists status text not null default '';
+alter table messages add column if not exists sticker boolean not null default false;
+create table if not exists stickers (
+  id         serial primary key,
+  user_id    int not null references users(id) on delete cascade,
+  image_id   int not null references images(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+create index if not exists stickers_user_idx on stickers(user_id);
 `;
 
 async function init() {

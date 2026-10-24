@@ -65,7 +65,7 @@ app.use(express.json({ limit: '20kb' }));
 async function userFromToken(token) {
   if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
   const { rows } = await pool.query(
-    `select u.id, u.username, u.display_name, u.color
+    `select u.id, u.username, u.display_name, u.color, u.avatar_image_id, u.bio, u.status
        from sessions s join users u on u.id = s.user_id
       where s.token_hash = $1 and s.created_at > now() - ($2 || ' days')::interval`,
     [sha256(token), String(SESSION_DAYS)]
@@ -79,7 +79,10 @@ async function startSession(req, res, userId) {
     httpOnly: true, sameSite: 'lax', secure: req.secure, path: '/', maxAge: SESSION_DAYS * 86400 * 1000,
   });
 }
-const publicUser = (u) => ({ id: u.id, username: u.username, name: u.display_name, color: u.color });
+const publicUser = (u) => ({
+  id: u.id, username: u.username, name: u.display_name, color: u.color,
+  avatarId: u.avatar_image_id || null, bio: u.bio || '', status: u.status || '',
+});
 const requireAuth = wrap(async (req, res, next) => {
   const me = await userFromToken(parseCookies(req.headers.cookie).sid);
   if (!me) throw httpError(401, 'Please log in.');
@@ -119,14 +122,33 @@ async function channelForMember(channelId, userId) {
   if (!info || !(await isMember(info.space_id, userId))) throw httpError(404, 'Channel not found.');
   return info;
 }
+// Everyone who shares a space with this user (including the user).
+async function peersOf(userId) {
+  const { rows } = await pool.query(
+    'select distinct user_id from members where space_id in (select space_id from members where user_id = $1)',
+    [userId]
+  );
+  return rows.map((r) => r.user_id);
+}
+// Delete a photo only when nothing (message, sticker pack, profile) still uses it.
+async function pruneImage(id) {
+  if (!id) return;
+  await pool.query(
+    `delete from images i where i.id = $1
+       and not exists (select 1 from messages m where m.image_id = i.id)
+       and not exists (select 1 from stickers s where s.image_id = i.id)
+       and not exists (select 1 from users u where u.avatar_image_id = i.id)`,
+    [id]
+  );
+}
 const messageRow = (r) => ({
   id: Number(r.id), channelId: r.channel_id, userId: r.user_id, name: r.name, color: r.color,
-  body: r.body, imageId: r.image_id, ts: r.ts,
+  body: r.body, imageId: r.image_id, sticker: !!r.sticker, avatarId: r.avatar_image_id || null, ts: r.ts,
 });
 const MESSAGE_SELECT = `
-  select m.id, m.channel_id, m.user_id, m.body, m.image_id,
+  select m.id, m.channel_id, m.user_id, m.body, m.image_id, m.sticker,
          floor(extract(epoch from m.created_at) * 1000)::float8 as ts,
-         u.display_name as name, u.color
+         u.display_name as name, u.color, u.avatar_image_id
     from messages m join users u on u.id = m.user_id`;
 
 /* ---------- accounts ---------- */
@@ -139,6 +161,11 @@ const joinLimiter = rateLimit({
   message: { error: 'Too many tries. Wait a few minutes and try again.' },
 });
 
+const uploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, limit: 80, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many uploads. Wait a few minutes and try again.' },
+});
+
 app.post('/api/signup', authLimiter, wrap(async (req, res) => {
   const username = clean(req.body.username, 20).toLowerCase();
   const password = String(req.body.password || '');
@@ -149,7 +176,7 @@ app.post('/api/signup', authLimiter, wrap(async (req, res) => {
   let user;
   try {
     const { rows } = await pool.query(
-      'insert into users(username, display_name, password_hash, color) values ($1,$2,$3,$4) returning id, username, display_name, color',
+      'insert into users(username, display_name, password_hash, color) values ($1,$2,$3,$4) returning id, username, display_name, color, avatar_image_id, bio, status',
       [username, display, hash, Math.floor(Math.random() * 360)]
     );
     user = rows[0];
@@ -170,7 +197,7 @@ app.post('/api/login', authLimiter, wrap(async (req, res) => {
   const ok = await bcrypt.compare(password, user ? user.password_hash : '$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5BcIXBlEjgDdbPYBQjC6Gz1qJ7nXe');
   if (!user || !ok) throw httpError(401, 'Wrong username or password.');
   await startSession(req, res, user.id);
-  res.json({ me: publicUser({ id: user.id, username: user.username, display_name: user.display_name, color: user.color }) });
+  res.json({ me: publicUser(user) });
 }));
 
 app.post('/api/logout', wrap(async (req, res) => {
@@ -181,6 +208,52 @@ app.post('/api/logout', wrap(async (req, res) => {
 }));
 
 app.get('/api/me', requireAuth, (req, res) => res.json({ me: publicUser(req.me) }));
+
+const USER_COLS = 'id, username, display_name, color, avatar_image_id, bio, status';
+app.patch('/api/me', requireAuth, wrap(async (req, res) => {
+  const b = req.body || {};
+  const sets = []; const vals = [];
+  const add = (col, v) => { vals.push(v); sets.push(`${col} = $${vals.length}`); };
+  if ('displayName' in b) {
+    const n = clean(b.displayName, 32);
+    if (!n) throw httpError(400, 'Display name cannot be empty.');
+    add('display_name', n);
+  }
+  if ('status' in b) add('status', clean(b.status, 60));
+  if ('bio' in b) add('bio', String(b.bio == null ? '' : b.bio).replace(/\r/g, '').trim().slice(0, 160));
+  if ('color' in b) {
+    const c = Number(b.color);
+    if (!Number.isInteger(c) || c < 0 || c > 359) throw httpError(400, 'Pick one of the colours.');
+    add('color', c);
+  }
+  if (!sets.length) throw httpError(400, 'Nothing to change.');
+  vals.push(req.me.id);
+  const { rows } = await pool.query(`update users set ${sets.join(', ')} where id = $${vals.length} returning ${USER_COLS}`, vals);
+  sendTo(await peersOf(req.me.id), { type: 'refresh' });
+  res.json({ me: publicUser(rows[0]) });
+}));
+
+app.post('/api/me/avatar', requireAuth, uploadLimiter,
+  express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '1mb' }),
+  wrap(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) throw httpError(400, 'Choose a PNG, JPG or WebP photo.');
+    const mime = sniffImage(req.body);
+    if (!mime || mime === 'image/gif') throw httpError(400, 'Choose a PNG, JPG or WebP photo.');
+    const img = await pool.query('insert into images(user_id, mime, data) values ($1,$2,$3) returning id', [req.me.id, mime, req.body]);
+    const old = req.me.avatar_image_id;
+    const { rows } = await pool.query(`update users set avatar_image_id = $1 where id = $2 returning ${USER_COLS}`, [img.rows[0].id, req.me.id]);
+    await pruneImage(old);
+    sendTo(await peersOf(req.me.id), { type: 'refresh' });
+    res.json({ me: publicUser(rows[0]) });
+  })
+);
+app.delete('/api/me/avatar', requireAuth, wrap(async (req, res) => {
+  const old = req.me.avatar_image_id;
+  const { rows } = await pool.query(`update users set avatar_image_id = null where id = $1 returning ${USER_COLS}`, [req.me.id]);
+  await pruneImage(old);
+  sendTo(await peersOf(req.me.id), { type: 'refresh' });
+  res.json({ me: publicUser(rows[0]) });
+}));
 
 /* ---------- spaces ---------- */
 async function loadSpaces(userId) {
@@ -194,7 +267,7 @@ async function loadSpaces(userId) {
   const ids = sp.rows.map((r) => r.id);
   const ch = await pool.query('select id, space_id, name from channels where space_id = any($1::int[]) order by id', [ids]);
   const mem = await pool.query(
-    `select m.space_id, u.id, u.display_name, u.username, u.color
+    `select m.space_id, u.id, u.display_name, u.username, u.color, u.avatar_image_id, u.bio, u.status
        from members m join users u on u.id = m.user_id
       where m.space_id = any($1::int[]) order by m.joined_at, u.id`,
     [ids]
@@ -204,7 +277,7 @@ async function loadSpaces(userId) {
     inviteCode: s.kind === 'dm' ? null : s.invite_code,
     channels: ch.rows.filter((c) => c.space_id === s.id).map((c) => ({ id: c.id, name: c.name })),
     members: mem.rows.filter((m) => m.space_id === s.id)
-      .map((m) => ({ id: m.id, name: m.display_name, username: m.username, color: m.color })),
+      .map((m) => ({ id: m.id, name: m.display_name, username: m.username, color: m.color, avatarId: m.avatar_image_id || null, bio: m.bio || '', status: m.status || '' })),
   }));
 }
 app.get('/api/spaces', requireAuth, wrap(async (req, res) => {
@@ -290,16 +363,18 @@ app.post('/api/spaces/:id/invite/regenerate', requireAuth, wrap(async (req, res)
   res.json({ inviteCode: code });
 }));
 
-app.post('/api/dms', requireAuth, wrap(async (req, res) => {
-  const other = Number(req.body.userId);
-  if (!Number.isInteger(other) || other === req.me.id) throw httpError(400, 'Pick someone else to message.');
-  // Only people who already share a space with you, so strangers cannot be looked up by id.
-  const shared = await pool.query(
-    `select 1 from members a join members b on a.space_id = b.space_id
-      where a.user_id = $1 and b.user_id = $2 limit 1`,
-    [req.me.id, other]
-  );
-  if (!shared.rowCount) throw httpError(403, 'You can only message people you share a space with.');
+app.post('/api/dms', requireAuth, joinLimiter, wrap(async (req, res) => {
+  let other;
+  if (req.body.username != null) {
+    const uname = clean(req.body.username, 21).toLowerCase().replace(/^@/, '');
+    const found = await pool.query('select id from users where username = $1', [uname]);
+    if (!found.rowCount) throw httpError(404, 'No one has that username. Check the spelling with your friend.');
+    other = found.rows[0].id;
+  } else {
+    other = Number(req.body.userId);
+    if (!Number.isInteger(other) || !(await pool.query('select 1 from users where id = $1', [other])).rowCount) throw httpError(404, 'Person not found.');
+  }
+  if (other === req.me.id) throw httpError(400, 'You cannot message yourself. Pick someone else.');
   const key = [req.me.id, other].sort((a, b) => a - b).join('_');
   const client = await pool.connect();
   let spaceId;
@@ -346,15 +421,21 @@ app.post('/api/channels/:id/messages', requireAuth, wrap(async (req, res) => {
   const channelId = Number(req.params.id);
   const info = await channelForMember(channelId, req.me.id);
   const body = String(req.body.body == null ? '' : req.body.body).trim().slice(0, 4000);
-  const imageId = req.body.imageId == null ? null : Number(req.body.imageId);
-  if (!body && imageId == null) throw httpError(400, 'Write a message or add a photo.');
-  if (imageId != null) {
+  let imageId = req.body.imageId == null ? null : Number(req.body.imageId);
+  const stickerId = req.body.stickerId == null ? null : Number(req.body.stickerId);
+  if (!body && imageId == null && stickerId == null) throw httpError(400, 'Write a message or add a photo.');
+  let isSticker = false;
+  if (stickerId != null) {
+    const st = await pool.query('select image_id from stickers where id = $1 and user_id = $2', [stickerId, req.me.id]);
+    if (!st.rowCount) throw httpError(400, 'That sticker is not in your pack.');
+    imageId = st.rows[0].image_id; isSticker = true;
+  } else if (imageId != null) {
     const img = await pool.query('select 1 from images where id = $1 and user_id = $2', [imageId, req.me.id]);
     if (!img.rowCount) throw httpError(400, 'That photo is not available. Upload it again.');
   }
   const ins = await pool.query(
-    'insert into messages(channel_id, user_id, body, image_id) values ($1,$2,$3,$4) returning id',
-    [channelId, req.me.id, body, imageId]
+    'insert into messages(channel_id, user_id, body, image_id, sticker) values ($1,$2,$3,$4,$5) returning id',
+    [channelId, req.me.id, isSticker ? '' : body, imageId, isSticker]
   );
   const { rows } = await pool.query(`${MESSAGE_SELECT} where m.id = $1`, [ins.rows[0].id]);
   const message = messageRow(rows[0]);
@@ -372,7 +453,7 @@ app.delete('/api/messages/:id', requireAuth, wrap(async (req, res) => {
     [id, req.me.id]
   );
   if (!rows.length) throw httpError(404, 'Message not found.');
-  if (rows[0].image_id) await pool.query('delete from images where id = $1', [rows[0].image_id]);
+  await pruneImage(rows[0].image_id);
   sendTo(await memberIds(rows[0].space_id), { type: 'delete', channelId: rows[0].channel_id, messageId: id });
   res.json({ ok: true });
 }));
@@ -388,6 +469,7 @@ function sniffImage(buf) {
 }
 app.post('/api/images',
   requireAuth,
+  uploadLimiter,
   express.raw({ type: ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], limit: '6mb' }),
   wrap(async (req, res) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw httpError(400, 'Choose a PNG, JPG, GIF or WebP photo.');
@@ -397,13 +479,60 @@ app.post('/api/images',
     res.json({ id: rows[0].id });
   })
 );
+/* ---------- stickers ---------- */
+const MAX_STICKERS = 60;
+app.get('/api/stickers', requireAuth, wrap(async (req, res) => {
+  const { rows } = await pool.query('select id, image_id from stickers where user_id = $1 order by id desc', [req.me.id]);
+  res.json({ stickers: rows.map((r) => ({ id: r.id, imageId: r.image_id })) });
+}));
+async function stickerCount(userId) {
+  return (await pool.query('select count(*)::int as n from stickers where user_id = $1', [userId])).rows[0].n;
+}
+app.post('/api/stickers', requireAuth, uploadLimiter,
+  express.raw({ type: 'image/png', limit: '1mb' }),
+  wrap(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !req.body.length) throw httpError(400, 'The sticker image was not received. Try again.');
+    if (sniffImage(req.body) !== 'image/png') throw httpError(400, 'Stickers must be PNG images.');
+    if ((await stickerCount(req.me.id)) >= MAX_STICKERS) throw httpError(400, `Your pack is full (${MAX_STICKERS} stickers). Delete one to add another.`);
+    const img = await pool.query("insert into images(user_id, mime, data) values ($1,'image/png',$2) returning id", [req.me.id, req.body]);
+    const st = await pool.query('insert into stickers(user_id, image_id) values ($1,$2) returning id', [req.me.id, img.rows[0].id]);
+    res.json({ sticker: { id: st.rows[0].id, imageId: img.rows[0].id } });
+  })
+);
+// Save a sticker someone sent in a space you belong to.
+app.post('/api/stickers/save', requireAuth, uploadLimiter, wrap(async (req, res) => {
+  const imageId = Number(req.body.imageId);
+  if (!Number.isInteger(imageId)) throw httpError(400, 'Pick a sticker to save.');
+  if ((await stickerCount(req.me.id)) >= MAX_STICKERS) throw httpError(400, `Your pack is full (${MAX_STICKERS} stickers). Delete one to add another.`);
+  const src = await pool.query(
+    `select i.data from images i where i.id = $1 and i.mime = 'image/png' and exists (
+       select 1 from messages m join channels c on c.id = m.channel_id join members mb on mb.space_id = c.space_id
+        where m.image_id = i.id and m.sticker and mb.user_id = $2)`,
+    [imageId, req.me.id]
+  );
+  if (!src.rowCount) throw httpError(404, 'That sticker is not available to you.');
+  const img = await pool.query("insert into images(user_id, mime, data) values ($1,'image/png',$2) returning id", [req.me.id, src.rows[0].data]);
+  const st = await pool.query('insert into stickers(user_id, image_id) values ($1,$2) returning id', [req.me.id, img.rows[0].id]);
+  res.json({ sticker: { id: st.rows[0].id, imageId: img.rows[0].id } });
+}));
+app.delete('/api/stickers/:id', requireAuth, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) throw httpError(404, 'Sticker not found.');
+  const { rows } = await pool.query('delete from stickers where id = $1 and user_id = $2 returning image_id', [id, req.me.id]);
+  if (!rows.length) throw httpError(404, 'Sticker not found.');
+  await pruneImage(rows[0].image_id);
+  res.json({ ok: true });
+}));
+
 app.get('/images/:id', requireAuth, wrap(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) throw httpError(404, 'Not found.');
   // Visible to the uploader, or to anyone in a space where the photo was posted.
   const { rows } = await pool.query(
     `select i.mime, i.data from images i
-      where i.id = $1 and (i.user_id = $2 or exists (
+      where i.id = $1 and (i.user_id = $2
+        or exists (select 1 from users u where u.avatar_image_id = i.id)
+        or exists (
         select 1 from messages m join channels c on c.id = m.channel_id
           join members mb on mb.space_id = c.space_id
          where m.image_id = i.id and mb.user_id = $2))`,
@@ -480,7 +609,7 @@ setInterval(() => {
 /* ---------- housekeeping ---------- */
 async function cleanup() {
   try {
-    await pool.query("delete from images i where i.created_at < now() - interval '1 day' and not exists (select 1 from messages m where m.image_id = i.id)");
+    await pool.query("delete from images i where i.created_at < now() - interval '1 day' and not exists (select 1 from messages m where m.image_id = i.id) and not exists (select 1 from stickers s where s.image_id = i.id) and not exists (select 1 from users u where u.avatar_image_id = i.id)");
     await pool.query("delete from sessions where created_at < now() - ($1 || ' days')::interval", [String(SESSION_DAYS)]);
   } catch (e) { console.error('Cleanup failed:', e.message); }
 }
