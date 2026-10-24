@@ -1,1 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Porchlight</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
 
+<div class="auth" id="auth" hidden>
+  <div class="card">
+    <div>
+      <h1>Porchlight</h1>
+      <p class="sub">Chat with your friends in servers, group chats and direct messages.</p>
+    </div>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tab-login" aria-selected="true">Log in</button>
+      <button type="button" role="tab" id="tab-signup" aria-selected="false">Create account</button>
+    </div>
+    <form id="form-login" autocomplete="on">
+      <div class="field"><label for="login-user">Username</label><input type="text" id="login-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>
+      <div class="field"><label for="login-pass">Password</label><input type="password" id="login-pass" name="password" autocomplete="current-password" required></div>
+      <p class="err" id="err-login" hidden></p>
+      <button class="btn primary" type="submit">Log in</button>
+    </form>
+    <form id="form-signup" autocomplete="on" hidden>
+      <div class="field"><label for="signup-name">Display name</label><input type="text" id="signup-name" name="displayName" maxlength="32" autocomplete="nickname" placeholder="What friends see"><small>You can use spaces and capitals here.</small></div>
+      <div class="field"><label for="signup-user">Username</label><input type="text" id="signup-user" name="username" maxlength="20" autocomplete="username" autocapitalize="none" spellcheck="false" required><small>3 to 20 letters, numbers or underscores. This is what you log in with.</small></div>
+      <div class="field"><label for="signup-pass">Password</label><input type="password" id="signup-pass" name="password" minlength="8" maxlength="72" autocomplete="new-password" required><small>At least 8 characters.</small></div>
+      <p class="err" id="err-signup" hidden></p>
+      <button class="btn primary" type="submit">Create account</button>
+    </form>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
+  <nav class="nav" id="nav" aria-label="Spaces">
+    <div class="rail" id="rail"></div>
+    <aside class="panel" id="panel"></aside>
+  </nav>
+  <button class="scrim" id="scrim" aria-label="Close menu"></button>
+  <main class="chat" id="chat">
+    <header class="top" id="top">
+      <button class="mini menu" id="menuBtn" aria-label="Open spaces and people"></button>
+      <div class="t"><b id="topTitle">Porchlight</b><span id="topSub"></span></div>
+      <button class="btn" id="inviteBtn" hidden></button>
+    </header>
+    <div class="conn" id="conn" hidden>Reconnecting. Messages will appear when the connection is back.</div>
+    <section class="welcome" id="welcome" hidden>
+      <h1>A porch for your people.</h1>
+      <p>Start a server with channels, open a group chat, or join one with an invite code from a friend.</p>
+      <div class="actions">
+        <button class="btn primary" data-open="server">Start a server</button>
+        <button class="btn" data-open="group">New group chat</button>
+        <button class="btn" data-open="join">Join with a code</button>
+      </div>
+    </section>
+    <div class="msgs" id="msgs" role="log" aria-live="polite" aria-label="Messages"></div>
+    <div class="typing" id="typing" aria-live="polite"></div>
+    <div class="composer" id="composer">
+      <div class="chip" id="chip" hidden><img id="chipImg" alt=""><span id="chipName"></span><button class="mini" id="chipX" aria-label="Remove photo"></button></div>
+      <div class="box">
+        <button class="mini" id="attachBtn" aria-label="Attach a photo"></button>
+        <textarea id="input" rows="1" maxlength="4000" aria-label="Message" placeholder="Write a message"></textarea>
+        <button class="send" id="sendBtn" aria-label="Send message"></button>
+      </div>
+      <input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+    </div>
+  </main>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="hd"><h3 id="modalTitle">Start</h3><button class="mini" id="modalX" aria-label="Close"></button></div>
+    <div class="pane" id="pane-start">
+      <button class="choice" data-open="server"><b>Start a server</b><span>A home for a crew, with channels like general or photos.</span></button>
+      <button class="choice" data-open="group"><b>New group chat</b><span>One conversation for a handful of people.</span></button>
+      <button class="choice" data-open="join"><b>Join with a code</b><span>Got an invite code from a friend? Enter it here.</span></button>
+    </div>
+    <form class="pane" id="pane-server"><label for="serverName">Server name</label><input type="text" id="serverName" maxlength="40" autocomplete="off" placeholder="Friday crew"><p class="err" id="err-server" hidden></p><button class="btn primary" type="submit">Create server</button></form>
+    <form class="pane" id="pane-group"><label for="groupName">Group name</label><input type="text" id="groupName" maxlength="40" autocomplete="off" placeholder="Road trip planning"><p class="err" id="err-group" hidden></p><button class="btn primary" type="submit">Create group chat</button></form>
+    <form class="pane" id="pane-join"><label for="joinCode">Invite code</label><input type="text" id="joinCode" maxlength="12" autocomplete="off" spellcheck="false" placeholder="ABCD-EFGH"><p class="err" id="err-join" hidden></p><button class="btn primary" type="submit">Join</button></form>
+    <form class="pane" id="pane-channel"><label for="channelName">Channel name</label><input type="text" id="channelName" maxlength="30" autocomplete="off" placeholder="photos"><p class="err" id="err-channel" hidden></p><button class="btn primary" type="submit">Add channel</button></form>
+    <div class="pane" id="pane-invite">
+      <p>Send this code to a friend. They create an account, choose Join with a code, and type it in.</p>
+      <div class="code" id="inviteCode"></div>
+      <div class="row2"><button class="btn primary" id="copyCode">Copy code</button><button class="btn" id="newCode" hidden>Make a new code</button></div>
+      <p>A new code stops the old one working for anyone who has not joined yet.</p>
+    </div>
+  </div>
+</div>
+<div class="lightbox" id="lightbox" hidden><img id="lightImg" alt="Photo, full size"></div>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
