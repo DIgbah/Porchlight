@@ -9,6 +9,7 @@ const ICONS = {
   send: '<svg viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-3-7z"/></svg>',
   x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   user: '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 19c.6-3.4 3-5 6-5s5.4 1.6 6 5M17 6v6M14 9h6"/></svg>',
+  react: '<svg viewBox="0 0 24 24"><circle cx="11" cy="12" r="8"/><path d="M8 14c1 1.2 2 1.8 3 1.8s2-.6 3-1.8M9 10h.01M13 10h.01M19 3v4M17 5h4"/></svg>',
   sticker: '<svg viewBox="0 0 24 24"><path d="M5 4h14v10l-6 6H5z"/><path d="M19 14h-6v6"/><path d="M9 9.5h.01M15 9.5h.01M9 13c1 1 2.4 1 3.4.3"/></svg>',
 };
 const put = (node, name) => { node.innerHTML = ICONS[name]; node.firstElementChild.setAttribute('class', 'ico'); };
@@ -18,6 +19,7 @@ const store = {
 };
 const fmtCode = (c) => (c || '').slice(0, 4) + '-' + (c || '').slice(4);
 const HUES = [0, 25, 50, 90, 140, 170, 195, 215, 240, 270, 300, 330];
+const EMOJIS = ['❤️','😂','😮','😢','👍','👎','🔥','🎉','😍','🙏','👀','💯','🤔','😡','😭','👏','💀','✨'];
 
 const S = {
   me: null, spaces: [], people: new Map(), activeSid: null, activeCid: null, msgs: [], hasMore: false,
@@ -292,11 +294,19 @@ function renderMsgs() {
       }
       row.append(wrap);
     }
-    if (m.userId === S.me.id) { const d = el('button', 'del', 'Delete'); arm(d, 'Sure?', () => deleteMsg(m.id)); row.append(d); }
+    if (m.reactions && m.reactions.length) row.append(reactionRow(m));
+    const tools = el('div', 'tools');
+    const rb = el('button', 'react'); rb.type = 'button'; rb.title = 'Add a reaction'; rb.setAttribute('aria-label', 'Add a reaction'); put(rb, 'react');
+    rb.firstElementChild.style.width = '14px'; rb.firstElementChild.style.height = '14px';
+    rb.addEventListener('click', (e) => { e.stopPropagation(); openPicker(rb, m); });
+    tools.append(rb);
+    if (m.userId === S.me.id) { const d = el('button', 'del', 'Delete'); arm(d, 'Sure?', () => deleteMsg(m.id)); tools.append(d); }
+    row.append(tools);
     box.append(row); lastUser = m.userId; lastTs = m.ts;
   }
   if (S.loadingEarlier) { box.scrollTop = prevTop + (box.scrollHeight - prevH); S.loadingEarlier = false; }
   else if (S.stick || nearBottom) { box.scrollTop = box.scrollHeight; S.pin = true; }
+  else box.scrollTop = prevTop;
   S.stick = false;
 }
 function renderTyping() {
@@ -308,6 +318,68 @@ function renderTyping() {
   $('typing').textContent = names.length === 0 ? '' : names.length === 1 ? names[0] + ' is typing…' : names.slice(0, 2).join(' and ') + ' are typing…';
 }
 setInterval(renderTyping, 1000);
+
+/* ---------- reactions ---------- */
+function applyReactions(messageId, reactions) {
+  const m = S.msgs.find((x) => x.id === messageId);
+  if (m) { m.reactions = reactions; renderMsgs(); }
+}
+async function react(m, body) {
+  closePicker();
+  try { const { reactions } = await api('POST', `/api/messages/${m.id}/reactions`, body); applyReactions(m.id, reactions); }
+  catch (e) { toast(e.message); }
+}
+function reactionRow(m) {
+  const row = el('div', 'rxs');
+  for (const g of m.reactions) {
+    const mine = g.userIds.includes(S.me.id);
+    const b = el('button', 'rx' + (mine ? ' mine' : '')); b.type = 'button';
+    if (g.emoji) b.append(el('span', 'e', g.emoji));
+    else { const im = el('img'); im.alt = 'Sticker reaction'; im.src = '/images/' + g.imageId; b.append(im); }
+    b.append(el('span', 'n', String(g.userIds.length)));
+    b.title = g.userIds.map((id) => personOf(id).name).join(', ');
+    b.setAttribute('aria-label', (g.emoji ? g.emoji : 'Sticker') + ' reaction from ' + b.title);
+    b.setAttribute('aria-pressed', String(mine));
+    if (g.emoji) b.addEventListener('click', () => react(m, { emoji: g.emoji }));
+    else if (mine) b.addEventListener('click', () => react(m, { removeImageId: g.imageId }));
+    else b.setAttribute('aria-disabled', 'true');
+    row.append(b);
+  }
+  return row;
+}
+function closePicker() { $('picker').hidden = true; }
+async function openPicker(anchor, m) {
+  const pk = $('picker');
+  if (!pk.hidden && pk.dataset.mid === String(m.id)) { closePicker(); return; }
+  pk.dataset.mid = String(m.id); pk.textContent = '';
+  const mine = new Set(m.reactions.filter((g) => g.userIds.includes(S.me.id)).map((g) => g.key));
+  pk.append(el('div', 'lab', 'React'));
+  const eg = el('div', 'egrid');
+  for (const e of EMOJIS) {
+    const b = el('button', null, e); b.type = 'button'; b.setAttribute('aria-label', 'React with ' + e); b.setAttribute('aria-pressed', String(mine.has('e:' + e)));
+    b.addEventListener('click', () => react(m, { emoji: e })); eg.append(b);
+  }
+  pk.append(eg);
+  const sl = el('div', 'lab', 'Your stickers'); const sg = el('div', 'pk-sgrid'); const sh = el('p', 'hint', 'Loading stickers…');
+  pk.append(sl, sg, sh);
+  placePicker(anchor); pk.hidden = false; placePicker(anchor);
+  try { S.stickers = (await api('GET', '/api/stickers')).stickers; } catch (e) { sh.textContent = 'Stickers could not load.'; return; }
+  if (pk.hidden || pk.dataset.mid !== String(m.id)) return;
+  sh.hidden = S.stickers.length > 0;
+  if (!S.stickers.length) sh.textContent = 'Make a sticker with the sticker button beside the message box, then react with it here.';
+  for (const st of S.stickers) {
+    const b = el('button', null); b.type = 'button'; b.setAttribute('aria-label', 'React with sticker'); b.setAttribute('aria-pressed', String(mine.has('i:' + st.imageId)));
+    const im = el('img'); im.alt = ''; im.src = '/images/' + st.imageId; b.append(im);
+    b.addEventListener('click', () => react(m, { stickerId: st.id })); sg.append(b);
+  }
+  placePicker(anchor);
+}
+function placePicker(anchor) {
+  const pk = $('picker'); const r = anchor.getBoundingClientRect(); const pw = pk.offsetWidth || 300; const ph = pk.offsetHeight || 260;
+  let left = Math.min(Math.max(8, r.right - pw), window.innerWidth - pw - 8);
+  let top = r.bottom + 6; if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+  pk.style.left = left + 'px'; pk.style.top = top + 'px';
+}
 
 /* ---------- live connection ---------- */
 function connectSocket() {
@@ -335,6 +407,7 @@ function onSocket(d) {
     if (d.channelId === S.activeCid) { S.msgs = S.msgs.filter((m) => m.id !== d.messageId); renderMsgs(); }
     return;
   }
+  if (d.type === 'reactions') { if (d.channelId === S.activeCid) applyReactions(d.messageId, d.reactions); return; }
   if (d.type === 'message') {
     const m = d.message;
     if (m.channelId === S.activeCid) {
@@ -705,8 +778,10 @@ function wire() {
     try { await api('POST', `/api/spaces/${S.activeSid}/invite/regenerate`); await refreshSpaces(); showInvite(); toast('New code ready'); } catch (e) { toast(e.message); }
   });
   $('lightbox').addEventListener('click', () => { $('lightbox').hidden = true; });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('lightbox').hidden = true; closeModal(); closeDrawer(); } });
-  $('msgs').addEventListener('scroll', () => { const b = $('msgs'); S.pin = b.scrollHeight - b.scrollTop - b.clientHeight < 80; });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('lightbox').hidden = true; closeModal(); closeDrawer(); closePicker(); } });
+  document.addEventListener('click', (e) => { if (!$('picker').hidden && !$('picker').contains(e.target)) closePicker(); });
+  window.addEventListener('resize', closePicker);
+  $('msgs').addEventListener('scroll', () => { closePicker(); const b = $('msgs'); S.pin = b.scrollHeight - b.scrollTop - b.clientHeight < 80; });
   $('sendBtn').addEventListener('click', send);
   $('attachBtn').addEventListener('click', () => $('file').click());
   $('file').addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; if (f) setPending(f); });
